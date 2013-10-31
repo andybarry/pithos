@@ -584,17 +584,24 @@ class PithosWindow(gtk.Window):
         return [i[0] for i in self.stations_model].index(station)
 
     def station_changed(self, station, reconnecting=False):
+        print "in station_changed"
         if station is self.current_station: return
+        print "in station_changed2"
         self.waiting_for_playlist = False
         if not reconnecting:
             self.stop()
             self.current_song_index = None
             self.songs_model.clear()
         logging.info("Selecting station %s; total = %i" % (station.id, len(self.stations_model)))
+        print "in station_changed after logging"
         self.current_station_id = station.id
         self.current_station = station
+        print "in station_changed, set station"
         if not reconnecting:
+            print "in station_changed, getting playlist..."
             self.get_playlist(start = True)
+            print "in station_changed, got playlist"
+        print "in station_changed, setting combo"
         self.stations_combo.set_active(self.station_index(station))
 
     def on_gst_eos(self, bus, message):
@@ -716,8 +723,7 @@ class PithosWindow(gtk.Window):
             self.update_song_row(song)
             self.emit('song-rating-changed', song)
         self.worker_run(song.rate, (RATE_LOVE,), callback, "Loving song...")
-
-
+        
     def ban_song(self, song=None):
         song = song or self.current_song
         def callback(l):
@@ -750,6 +756,27 @@ class PithosWindow(gtk.Window):
     def bookmark_song_artist(self, song=None):
         song = song or self.current_song
         self.worker_run(song.bookmark_artist, (), None, "Bookmarking...")
+        
+    def next_station(self):
+        # get the current station index
+        num = 0
+        for i in self.pandora.stations:
+            print "num = " + str(num)
+            if i.id == self.current_station_id:
+                break
+            num = num + 1
+        print "final num = " + str(num)
+        print "len = " + str(len(self.pandora.stations))
+        if (len(self.pandora.stations) == num + 1):
+            index = 0
+        else:
+            index = num + 1
+        print "index = " + str(index)
+        #self.stations_combo.set_active(self.station_index(self.pandora.stations[num]))
+        print self.pandora.stations[index].id
+        self.station_changed(self.pandora.stations[index])
+        #print self.stations_model
+        #self.station_changed(self.stations_model[1][0])
 
     def on_menuitem_love(self, widget):
         self.love_song(self.selected_song())

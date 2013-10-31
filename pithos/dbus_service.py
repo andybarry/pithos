@@ -80,6 +80,10 @@ class PithosDBusProxy(dbus.service.Object):
     @dbus.service.signal(DBUS_BUS, signature='a{sv}')
     def SongChanged(self, songinfo):
         pass    
+        
+    @dbus.service.method(DBUS_BUS)
+    def NextStation(self):
+        self.window.next_station()
 
 
 def try_to_raise():

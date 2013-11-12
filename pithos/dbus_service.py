@@ -84,6 +84,14 @@ class PithosDBusProxy(dbus.service.Object):
     @dbus.service.method(DBUS_BUS)
     def NextStation(self):
         self.window.next_station()
+        
+    @dbus.service.method(DBUS_BUS)
+    def IncreaseVolume(self):
+        self.window.increase_volume()
+        
+    @dbus.service.method(DBUS_BUS)
+    def DecreaseVolume(self):
+        self.window.decrease_volume()
 
 
 def try_to_raise():

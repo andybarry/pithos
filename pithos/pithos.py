@@ -768,7 +768,7 @@ class PithosWindow(gtk.Window):
         print "final num = " + str(num)
         print "len = " + str(len(self.pandora.stations))
         if (len(self.pandora.stations) == num + 1):
-            index = 0
+            index = 1 # this would be 0, but we do not want to include quickmix
         else:
             index = num + 1
         print "index = " + str(index)

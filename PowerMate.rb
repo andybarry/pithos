@@ -518,6 +518,7 @@ rescue RuntimeError => e
 end
 
 timedown = 0
+timedown2 = 0
 isdown = 0
 lastloveorban = 0
 pressused = 0
@@ -530,13 +531,36 @@ $stdout << "PowerMate found on #{pmate.devnode}\n"
 ## register event handler for button press, switch off LED
 pmate.on_button_press{
   print "Button pressed\n"
-  pressused = 0
+  pressused = 0 # goes to 1 if this press has been used (ie by a long-press)
   pressturn = 0
-  timedown = Time.new.to_f
+  timedown2 = timedown # cache the old timedown for double-press detection
+  timedown = Time.new.to_f # time of this press
   isdown = 1
-  pmate.brightness = 255
+  pmate.brightness = 255 # set the LED to full brightness
+  
+  # on every press, attempt to start pithos
+  # if it is already running it will just raise itself
+  # otherwise, good thing we started it
+  
+  # this is so you can set a cron job to kill pithos every night
+  exec("pithos &") if fork.nil?
+  
+  # check for double-press
+  if (timedown - timedown2 < 0.5)
+    
+    # we've gotten two presses within half a second
+    
+    # restart pithos
+    print "Restarting pithos\n"
+    exec("killall pithos; sleep .2 && pithos &") if fork.nil?
+    
+    pressused = 1
+  
+  end
   
   # start a bash script to spawn a .75 second timer
+  # for long-press
+  # this timer will switch stations unless the process is killed
   switchpid = fork do
     exec("sleep .75 && dbus-send --print-reply --dest=net.kevinmehall.Pithos /net/kevinmehall/Pithos net.kevinmehall.Pithos.NextStation")
     exit! 127
@@ -552,14 +576,20 @@ pmate.on_button_press{
 pmate.on_button_release{
   print "Button released\n"
   print Time.new.to_f - timedown
-  isdown = 0
-  pmate.brightness = 100
+  isdown = 0 # not down anymore
+  pmate.brightness = 100 # reduce LED brightness
 
-  if pressused == 0
+
+  # check for a double-press
+  
+
+  if pressused == 0 # make sure we haven't already used this press
     if (Time.new.to_f - timedown) > 0.75
       # switch stations
       #exec("dbus-send --print-reply --dest=net.kevinmehall.Pithos /net/kevinmehall/Pithos net.kevinmehall.Pithos.NextStation") if fork.nil?
+      
       # we've already fired the bash process to switch stations after .75 seconds, so do nothing
+      
     else
       # abort the bash process that would switch stations, then play/pause
       #print "\nkill #{switchpid}\n"
@@ -567,9 +597,6 @@ pmate.on_button_release{
     end
   end
   
-
-
-
 
 }
 

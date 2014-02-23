@@ -15,8 +15,10 @@
 ### END LICENSE
 
 from pithos.pandora.pandora import *
-import gtk
+from gi.repository import Gtk
 import logging
+
+TEST_FILE = "http://pithos.github.io/testfile.aac"
 
 class FakePandora(Pandora):
     def __init__(self):
@@ -30,16 +32,16 @@ class FakePandora(Pandora):
         return self.counter
         
     def show_fail_window(self):
-        self.window = gtk.Window()
+        self.window = Gtk.Window()
         self.window.set_size_request(200, 100)
         self.window.set_title("Pithos failure tester")
         self.window.set_opacity(0.7)
-        self.auth_check = gtk.CheckButton("Authenticated")
-        self.time_check = gtk.CheckButton("Be really slow")
-        vbox = gtk.VBox()
+        self.auth_check = Gtk.CheckButton.new_with_label("Authenticated")
+        self.time_check = Gtk.CheckButton.new_with_label("Be really slow")
+        vbox = Gtk.VBox()
         self.window.add(vbox)
-        vbox.pack_start(self.auth_check)
-        vbox.pack_start(self.time_check)
+        vbox.pack_start(self.auth_check, True, True, 0)
+        vbox.pack_start(self.time_check, True, True, 0)
         self.window.show_all()
 
     def maybe_fail(self):
@@ -94,7 +96,7 @@ class FakePandora(Pandora):
         else:
             logging.error("Invalid method %s" % method)
 
-    def connect(self, user, password):
+    def connect(self, client, user, password):
         self.set_authenticated()
         self.get_stations()
 
@@ -105,17 +107,29 @@ class FakePandora(Pandora):
 
     def makeFakeSong(self, stationId):
         c = self.count()
+        audio_url = TEST_FILE + '?val='+'0'*48
         return {
             'albumName':"AlbumName",
             'artistName':"ArtistName",
-            'additionalAudioUrl':'http://kevinmehall.net/p/pithos/testfile.aac?val='+'0'*48,
+            'audioUrlMap': {
+                'highQuality': {
+                    'audioUrl': audio_url
+                },
+                'mediumQuality': {
+                    'audioUrl': audio_url
+                },
+                'lowQuality': {
+                    'audioUrl': audio_url
+                },
+            },
             'trackGain':0,
             'trackToken':'5908540384',
             'songRating': 1 if c%3 == 0 else 0,
             'stationId': stationId,
             'songName': 'Test song %i'%c,
-            'songDetailUrl': 'http://kevinmehall.net/p/pithos/',
-            'albumDetailUrl':'http://kevinmehall.net/p/pithos/',
-            'albumArtUrl':'http://i.imgur.com/H4Z8x.jpg',
+            'songDetailUrl': 'http://pithos.github.io/',
+            'albumDetailUrl':'http://pithos.github.io/',
+            'albumArtUrl':'http://pithos.github.io/img/logo.png',
+            'songExplorerUrl':'http://pithos.github.io/test-song.xml',
         }
 

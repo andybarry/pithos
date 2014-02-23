@@ -93,12 +93,3 @@ class PithosDBusProxy(dbus.service.Object):
     def DecreaseVolume(self):
         self.window.decrease_volume()
 
-
-def try_to_raise():
-    bus = dbus.SessionBus()
-    try:
-        proxy = bus.get_object(DBUS_BUS, DBUS_OBJECT_PATH)
-        proxy.Present()
-        return True
-    except dbus.exceptions.DBusException as e:
-        return False

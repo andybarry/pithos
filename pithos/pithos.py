@@ -16,27 +16,23 @@
 ### END LICENSE
 
 import sys
+import re
 import os, time
-import gtk, gobject, pango
+import logging, argparse
+import signal
 
-# optional Launchpad integration
-# this shouldn't crash if not found as it is simply used for bug reporting
-try:
-    import LaunchpadIntegration
-    launchpad_available = True
-except:
-    launchpad_available = False
-
-import gst
-import cgi
+import gi
+gi.require_version('Gst', '1.0')
+from gi.repository import Gst, GObject, Gtk, Gdk, Pango, GdkPixbuf, Gio, GLib
+import contextlib
+import html
 import math
 import webbrowser
-import os
-import urllib2
-import dbus
+import urllib.request, urllib.error, urllib.parse
 import json
-from dbus.mainloop.glib import DBusGMainLoop
-DBusGMainLoop(set_as_default=True)
+if sys.platform != 'win32':
+    from dbus.mainloop.glib import DBusGMainLoop
+    DBusGMainLoop(set_as_default=True)
 
 # Check if we are working in the source tree or from the installed
 # package and mangle the python path accordingly
@@ -52,85 +48,96 @@ sys.path.insert(0, os.path.dirname(fullPath))
 
 from . import AboutPithosDialog, PreferencesPithosDialog, StationsDialog
 from .util import *
-from .pithosconfig import get_data_file, getdatapath, VERSION
+from .pithosconfig import getdatapath, VERSION
 from .gobject_worker import GObjectWorker
 from .plugin import load_plugins
-from .dbus_service import PithosDBusProxy, try_to_raise
-from .sound_menu import PithosSoundMenu
+if sys.platform != 'win32':
+    from .dbus_service import PithosDBusProxy
+    from .mpris import PithosMprisService
 from .pandora import *
 from .pandora.data import *
 
+pacparser_imported = False
+try:
+    import pacparser
+    pacparser_imported = True
+except ImportError:
+    logging.warning("Disabled proxy auto-config support because python-pacparser module was not found.")
 
 def openBrowser(url):
-    print "Opening %s"%url
+    logging.info("Opening URL {}".format(url))
     webbrowser.open(url)
-    try:
-        os.wait() # workaround for http://bugs.python.org/issue5993
-    except:
-        pass
+    if isinstance(webbrowser.get(), webbrowser.BackgroundBrowser):
+        try:
+            os.wait() # workaround for http://bugs.python.org/issue5993
+        except:
+            pass
 
 def buttonMenu(button, menu):
     def cb(button):
         allocation = button.get_allocation()
-        x, y = button.window.get_origin()
+        x, y = button.get_window().get_origin()[1:]
         x += allocation.x
         y += allocation.y + allocation.height
-        menu.popup(None, None, (lambda *ignore: (x, y, True)), 1, gtk.get_current_event_time())
+        menu.popup(None, None, (lambda *ignore: (x, y, True)), None, 1, Gtk.get_current_event_time())
 
     button.connect('clicked', cb)
 
 ALBUM_ART_SIZE = 96
 ALBUM_ART_X_PAD = 6
 
-class CellRendererAlbumArt(gtk.GenericCellRenderer):
+class CellRendererAlbumArt(Gtk.CellRenderer):
     def __init__(self):
-        self.__gobject_init__()
+        GObject.GObject.__init__(self)
         self.icon = None
         self.pixbuf = None
-        self.rate_bg = gtk.gdk.pixbuf_new_from_file(os.path.join(getdatapath(), 'media', 'rate_bg.png'))
+        self.rate_bg = GdkPixbuf.Pixbuf.new_from_file(os.path.join(getdatapath(), 'media', 'rate_bg.png'))
 
     __gproperties__ = {
-        'icon': (str, 'icon', 'icon', '', gobject.PARAM_READWRITE),
-        'pixbuf': (gtk.gdk.Pixbuf, 'pixmap', 'pixmap',  gobject.PARAM_READWRITE)
+        'icon': (str, 'icon', 'icon', '', GObject.PARAM_READWRITE),
+        'pixbuf': (GdkPixbuf.Pixbuf, 'pixmap', 'pixmap',  GObject.PARAM_READWRITE)
     }
 
     def do_set_property(self, pspec, value):
         setattr(self, pspec.name, value)
     def do_get_property(self, pspec):
         return getattr(self, pspec.name)
-    def on_get_size(self, widget, cell_area):
+    def do_get_size(self, widget, cell_area):
         return (0, 0, ALBUM_ART_SIZE + ALBUM_ART_X_PAD, ALBUM_ART_SIZE)
-    def on_render(self, window, widget, background_area, cell_area, expose_area, flags):
+    def do_render(self, ctx, widget, background_area, cell_area, flags):
         if self.pixbuf:
-            window.draw_pixbuf(None, self.pixbuf, 0, 0, cell_area.x, cell_area.y, width=-1, height=-1, dither=gtk.gdk.RGB_DITHER_NORMAL, x_dither=0, y_dither=0)
+            Gdk.cairo_set_source_pixbuf(ctx, self.pixbuf, cell_area.x, cell_area.y)
+            ctx.paint()
         if self.icon:
             x = cell_area.x+(cell_area.width-self.rate_bg.get_width()) - ALBUM_ART_X_PAD # right
             y = cell_area.y+(cell_area.height-self.rate_bg.get_height()) # bottom
-            window.draw_pixbuf(None, self.rate_bg, 0, 0, x, y, width=-1, height=-1, dither=gtk.gdk.RGB_DITHER_NORMAL, x_dither=0, y_dither=0)
+            Gdk.cairo_set_source_pixbuf(ctx, self.rate_bg, x, y)
+            ctx.paint()
 
-            icon = widget.style.lookup_icon_set(self.icon)
-            pixbuf = icon.render_icon(widget.style, widget.get_direction(), gtk.STATE_ACTIVE, gtk.ICON_SIZE_MENU, widget, detail=None)
+            icon = widget.get_style_context().lookup_icon_set(self.icon)
+            pixbuf = icon.render_icon_pixbuf(widget.get_style_context(), Gtk.IconSize.MENU)
             x = cell_area.x+(cell_area.width-pixbuf.get_width())-5 - ALBUM_ART_X_PAD # right
             y = cell_area.y+(cell_area.height-pixbuf.get_height())-5 # bottom
-            window.draw_pixbuf(None, pixbuf, 0, 0, x, y, width=-1, height=-1, dither=gtk.gdk.RGB_DITHER_NORMAL, x_dither=0, y_dither=0)
+            Gdk.cairo_set_source_pixbuf(ctx, pixbuf, x, y)
+            ctx.paint()
 
 def get_album_art(url, *extra):
-     content = urllib2.urlopen(url).read()
-     l = gtk.gdk.PixbufLoader()
-     l.set_size(ALBUM_ART_SIZE, ALBUM_ART_SIZE)
-     l.write(content)
-     l.close()
-     return (l.get_pixbuf(),) + extra
+    l = GdkPixbuf.PixbufLoader()
+    l.set_size(ALBUM_ART_SIZE, ALBUM_ART_SIZE)
+    with contextlib.closing(urllib.request.urlopen(url)) as f:
+        l.write(f.read())
+    l.close()
+    return (l.get_pixbuf(),) + extra
 
 
-class PithosWindow(gtk.Window):
+class PithosWindow(Gtk.ApplicationWindow):
     __gtype_name__ = "PithosWindow"
     __gsignals__ = {
-        "song-changed": (gobject.SIGNAL_RUN_FIRST, gobject.TYPE_NONE, (gobject.TYPE_PYOBJECT,)),
-        "song-ended": (gobject.SIGNAL_RUN_FIRST, gobject.TYPE_NONE, (gobject.TYPE_PYOBJECT,)),
-        "song-rating-changed": (gobject.SIGNAL_RUN_FIRST, gobject.TYPE_NONE, (gobject.TYPE_PYOBJECT,)),
-        "play-state-changed": (gobject.SIGNAL_RUN_FIRST, gobject.TYPE_NONE, (gobject.TYPE_BOOLEAN,)),
-        "user-changed-play-state": (gobject.SIGNAL_RUN_FIRST, gobject.TYPE_NONE, (gobject.TYPE_BOOLEAN,)),
+        "song-changed": (GObject.SignalFlags.RUN_FIRST, None, (GObject.TYPE_PYOBJECT,)),
+        "song-ended": (GObject.SignalFlags.RUN_FIRST, None, (GObject.TYPE_PYOBJECT,)),
+        "song-rating-changed": (GObject.SignalFlags.RUN_FIRST, None, (GObject.TYPE_PYOBJECT,)),
+        "play-state-changed": (GObject.SignalFlags.RUN_FIRST, None, (GObject.TYPE_BOOLEAN,)),
+        "user-changed-play-state": (GObject.SignalFlags.RUN_FIRST, None, (GObject.TYPE_BOOLEAN,)),
     }
 
     def __init__(self):
@@ -151,37 +158,31 @@ class PithosWindow(gtk.Window):
         initializing the start of the new PithosWindow instance.
 
         """
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+
         self.cmdopts = cmdopts
 
         #get a reference to the builder and set up the signals
         self.builder = builder
         self.builder.connect_signals(self)
 
-        global launchpad_available
-        if False and launchpad_available: # Disable this
-            # see https://wiki.ubuntu.com/UbuntuDevelopment/Internationalisation/Coding for more information
-            # about LaunchpadIntegration
-            helpmenu = self.builder.get_object('menu_options')
-            if helpmenu:
-                LaunchpadIntegration.set_sourcepackagename('pithos')
-                LaunchpadIntegration.add_items(helpmenu, 0, False, True)
-            else:
-                launchpad_available = False
-
         self.prefs_dlg = PreferencesPithosDialog.NewPreferencesPithosDialog()
+        self.prefs_dlg.set_transient_for(self)
         self.preferences = self.prefs_dlg.get_preferences()
 
         if self.prefs_dlg.fix_perms():
             # Changes were made, save new config variable
             self.prefs_dlg.save()
+
         self.init_core()
         self.init_ui()
 
         self.plugins = {}
         load_plugins(self)
 
-        self.dbus_service = PithosDBusProxy(self)
-        self.sound_menu = PithosSoundMenu(self)
+        if sys.platform != 'win32':
+            self.dbus_service = PithosDBusProxy(self)
+            self.mpris = PithosMprisService(self)
 
         if not self.preferences['username']:
             self.show_preferences(is_startup=True)
@@ -193,20 +194,22 @@ class PithosWindow(gtk.Window):
 
     def init_core(self):
         #                                Song object            display text  icon  album art
-        self.songs_model = gtk.ListStore(gobject.TYPE_PYOBJECT, str,          str,  gtk.gdk.Pixbuf)
+        self.songs_model = Gtk.ListStore(GObject.TYPE_PYOBJECT, str,          str,  GdkPixbuf.Pixbuf)
         #                                   Station object         station name
-        self.stations_model = gtk.ListStore(gobject.TYPE_PYOBJECT, str)
+        self.stations_model = Gtk.ListStore(GObject.TYPE_PYOBJECT, str)
 
-        self.player = gst.element_factory_make("playbin2", "player")
+        Gst.init(None)
+        self.player = Gst.ElementFactory.make("playbin", "player");
         self.player.props.flags |= (1 << 7) # enable progressive download (GST_PLAY_FLAG_DOWNLOAD)
         bus = self.player.get_bus()
         bus.add_signal_watch()
         bus.connect("message::eos", self.on_gst_eos)
         bus.connect("message::buffering", self.on_gst_buffering)
         bus.connect("message::error", self.on_gst_error)
+        bus.connect("message::tag", self.on_gst_tag)
         self.player.connect("notify::volume", self.on_gst_volume)
         self.player.connect("notify::source", self.on_gst_source)
-        self.time_format = gst.Format(gst.FORMAT_TIME)
+        self.time_format = Gst.Format.TIME
 
         self.stations_dlg = None
 
@@ -228,12 +231,13 @@ class PithosWindow(gtk.Window):
         self.worker = GObjectWorker()
         self.art_worker = GObjectWorker()
 
-        aa = gtk.gdk.pixbuf_new_from_file(os.path.join(getdatapath(), 'media', 'album_default.png'))
-        self.default_album_art = aa.scale_simple(ALBUM_ART_SIZE, ALBUM_ART_SIZE, gtk.gdk.INTERP_BILINEAR)
+        aa = GdkPixbuf.Pixbuf.new_from_file(os.path.join(getdatapath(), 'media', 'album_default.png'))
+
+        self.default_album_art = aa.scale_simple(ALBUM_ART_SIZE, ALBUM_ART_SIZE, GdkPixbuf.InterpType.BILINEAR)
 
     def init_ui(self):
-        gobject.set_application_name("Pithos")
-        gtk.window_set_default_icon_name('pithos')
+        GLib.set_application_name("Pithos")
+        Gtk.Window.set_default_icon_name('pithos')
         os.environ['PULSE_PROP_media.role'] = 'music'
 
         self.playpause_button = self.builder.get_object('playpause_button')
@@ -252,24 +256,24 @@ class PithosWindow(gtk.Window):
         self.songs_treeview = self.builder.get_object('songs_treeview')
         self.songs_treeview.set_model(self.songs_model)
 
-        title_col   = gtk.TreeViewColumn()
+        title_col   = Gtk.TreeViewColumn()
 
-        def bgcolor_data_func(column, cell, model, iter):
+        def bgcolor_data_func(column, cell, model, iter, data=None):
             if model.get_value(iter, 0) is self.current_song:
-                bgcolor = column.get_tree_view().get_style().mid[gtk.STATE_NORMAL]
+                bgcolor = column.get_tree_view().get_style_context().get_background_color(Gtk.StateFlags.ACTIVE)
             else:
-                bgcolor = column.get_tree_view().get_style().base[gtk.STATE_NORMAL]
-            cell.set_property("cell-background-gdk", bgcolor)
+                bgcolor = column.get_tree_view().get_style_context().get_background_color(Gtk.StateFlags.NORMAL)
+            cell.set_property("cell-background-rgba", bgcolor)
 
         render_icon = CellRendererAlbumArt()
-        title_col.pack_start(render_icon, expand=False)
+        title_col.pack_start(render_icon, False)
         title_col.add_attribute(render_icon, "icon", 2)
         title_col.add_attribute(render_icon, "pixbuf", 3)
         title_col.set_cell_data_func(render_icon, bgcolor_data_func)
 
-        render_text = gtk.CellRendererText()
-        render_text.props.ellipsize = pango.ELLIPSIZE_END
-        title_col.pack_start(render_text, expand=True)
+        render_text = Gtk.CellRendererText()
+        render_text.props.ellipsize = Pango.EllipsizeMode.END
+        title_col.pack_start(render_text, True)
         title_col.add_attribute(render_text, "markup", 1)
         title_col.set_cell_data_func(render_text, bgcolor_data_func)
 
@@ -279,12 +283,10 @@ class PithosWindow(gtk.Window):
 
         self.stations_combo = self.builder.get_object('stations')
         self.stations_combo.set_model(self.stations_model)
-        render_text = gtk.CellRendererText()
-        self.stations_combo.pack_start(render_text, expand=True)
+        render_text = Gtk.CellRendererText()
+        self.stations_combo.pack_start(render_text, True)
         self.stations_combo.add_attribute(render_text, "text", 1)
-        self.stations_combo.set_row_separator_func(lambda model, iter: model.get_value(iter, 0) is None)
-
-        buttonMenu(self.builder.get_object("toolbutton_options"), self.builder.get_object("menu_options"))
+        self.stations_combo.set_row_separator_func(lambda model, iter, data=None: model.get_value(iter, 0) is None, None)
 
     def worker_run(self, fn, args=(), callback=None, message=None, context='net'):
         if context and message:
@@ -325,7 +327,7 @@ class PithosWindow(gtk.Window):
         if self.preferences['proxy']:
             return self.preferences['proxy']
 
-        system_proxies = urllib.getproxies()
+        system_proxies = urllib.request.getproxies()
         if 'http' in system_proxies:
             return system_proxies['http']
 
@@ -342,14 +344,27 @@ class PithosWindow(gtk.Window):
         handlers = []
         global_proxy = self.preferences['proxy']
         if global_proxy:
-            handlers.append(urllib2.ProxyHandler({'http': global_proxy, 'https': global_proxy}))
-        global_opener = urllib2.build_opener(*handlers)
-        urllib2.install_opener(global_opener)
+            handlers.append(urllib.request.ProxyHandler({'http': global_proxy, 'https': global_proxy}))
+        global_opener = urllib.request.build_opener(*handlers)
+        urllib.request.install_opener(global_opener)
 
         control_opener = global_opener
         control_proxy = self.preferences['control_proxy']
+        control_proxy_pac = self.preferences['control_proxy_pac']
+
         if control_proxy:
-            control_opener = urllib2.build_opener(urllib2.ProxyHandler({'http': control_proxy, 'https': control_proxy}))
+            control_opener = urllib.request.build_opener(urllib.request.ProxyHandler({'http': control_proxy, 'https': control_proxy}))
+
+        elif control_proxy_pac and pacparser_imported:
+            pacparser.init()
+            pacparser.parse_pac_string(urllib.request.urlopen(control_proxy_pac).read())
+            proxies = pacparser.find_proxy("http://pandora.com", "pandora.com").split(";")
+            for proxy in proxies:
+                match = re.search("PROXY (.*)", proxy)
+                if match:
+                    control_proxy = match.group(1)
+                    break
+
         self.worker_run('set_url_opener', (control_opener,))
 
     def set_audio_quality(self):
@@ -437,7 +452,8 @@ class PithosWindow(gtk.Window):
             return self.next_song()
 
         logging.info("Starting song: index = %i"%(song_index))
-        self.buffer_percent = 100
+        self.buffer_percent = 0
+        self.song_started = False
         self.player.set_property("uri", self.current_song.audioUrl)
         self.play()
         self.playcount += 1
@@ -455,14 +471,15 @@ class PithosWindow(gtk.Window):
 
     def user_play(self, *ignore):
         self.play()
+        self.song_started = True
         self.emit('user-changed-play-state', True)
 
     def play(self):
         if not self.playing:
             self.playing = True
-            self.player.set_state(gst.STATE_PLAYING)
-            gobject.timeout_add_seconds(1, self.update_song_row)
-        self.playpause_button.set_stock_id(gtk.STOCK_MEDIA_PAUSE)
+        self.player.set_state(Gst.State.PLAYING)
+        GLib.timeout_add_seconds(1, self.update_song_row)
+        self.playpause_button.set_stock_id(Gtk.STOCK_MEDIA_PAUSE)
         self.update_song_row()
         self.emit('play-state-changed', True)
 
@@ -472,8 +489,8 @@ class PithosWindow(gtk.Window):
 
     def pause(self):
         self.playing = False
-        self.player.set_state(gst.STATE_PAUSED)
-        self.playpause_button.set_stock_id(gtk.STOCK_MEDIA_PLAY)
+        self.player.set_state(Gst.State.PAUSED)
+        self.playpause_button.set_stock_id(Gtk.STOCK_MEDIA_PLAY)
         self.update_song_row()
         self.emit('play-state-changed', False)
 
@@ -482,18 +499,21 @@ class PithosWindow(gtk.Window):
         prev = self.current_song
         if prev and prev.start_time:
             prev.finished = True
-            try:
-                prev.duration = self.player.query_duration(self.time_format, None)[0] / 1000000000
-                prev.position = self.player.query_position(self.time_format, None)[0] / 1000000000
-            except gst.QueryError:
-                prev.duration = prev.position = None
+            dur_stat, dur = self.player.query_duration(self.time_format)
+            prev.duration = dur//1000000000 if dur_stat else None
+            pos_stat, pos = self.player.query_position(self.time_format)
+            prev.position = pos//1000000000 if pos_stat else None
             self.emit("song-ended", prev)
 
         self.playing = False
-        self.player.set_state(gst.STATE_NULL)
+        self.player.set_state(Gst.State.NULL)
         self.emit('play-state-changed', False)
 
+    def user_playpause(self, *ignore):
+        self.playpause_notify()
+        
     def playpause(self, *ignore):
+        logging.info("playpause")
         if self.playing:
             self.pause()
         else:
@@ -577,7 +597,7 @@ class PithosWindow(gtk.Window):
         dialog = self.builder.get_object("api_update_dialog")
         response = dialog.run()
         if response:
-            openBrowser("http://kevinmehall.net/p/pithos/itbroke?utm_source=pithos&utm_medium=app&utm_campaign=%s"%VERSION)
+            openBrowser("http://pithos.github.io/itbroke?utm_source=pithos&utm_medium=app&utm_campaign=%s"%VERSION)
         self.quit()
 
     def station_index(self, station):
@@ -614,7 +634,7 @@ class PithosWindow(gtk.Window):
         if self.current_song:
             self.current_song.message = "Error: "+str(err)
 
-        #if err.code is int(gst.CORE_ERROR_MISSING_PLUGIN):
+        #if err.code is int(Gst.CORE_ERROR_MISSING_PLUGIN):
         #    self.fatal_error_dialog("Missing codec", submsg="GStreamer is missing a plugin")
         #    return
 
@@ -622,14 +642,73 @@ class PithosWindow(gtk.Window):
         self.gstreamer_errorcount_1 += 1
         self.next_song()
 
+    def gst_tag_handler(self, tag_info):
+        def handler(_x, tag, _y):
+            # An exhaustive list of tags is available at 
+            # https://developer.gnome.org/gstreamer/stable/gstreamer-GstTagList.html
+            # but Pandora seems to only use those
+            if tag == 'datetime':
+                _, datetime = tag_info.get_date_time(tag)
+                value = datetime.to_iso8601_string()
+            elif tag in ('container-format', 'audio-codec'):
+                _, value = tag_info.get_string(tag)
+            elif tag in ('bitrate', 'maximum-bitrate', 'minimum-bitrate'):
+                _, value = tag_info.get_uint(tag)
+            else:
+                value = 'Don\'t know the type of this'
+
+            logging.debug('Found tag "%s" in stream: "%s" (type: %s)' % (tag, value, type(value)))
+
+            if tag == 'audio-codec':
+                # At that point we should have duration information, check for ads
+                self.check_if_song_is_ad()
+
+            if tag == 'bitrate':
+                self.current_song.bitrate = value
+                self.update_song_row()
+
+        return handler
+
+    def check_if_song_is_ad(self):
+        if self.current_song.is_ad is None:
+            dur_stat, dur_int = self.player.query_duration(self.time_format)
+
+            if not dur_stat:
+                logging.warning('dur_stat is False. The assumption that duration is available once the audio-codec messages feeds is bad.')
+            else:
+                dur_int /= 1e9
+
+                if dur_int < 45.0:  # Less than 45 seconds we assume it's an ad
+                    logging.info('Ad detected!')
+                    self.current_song.is_ad = True
+                    self.update_song_row()
+                else:
+                    logging.info('Not an Ad..')
+                    self.current_song.is_ad = False
+
+    def on_gst_tag(self, bus, message):
+        tag_info = message.parse_tag()
+        tag_handler = self.gst_tag_handler(tag_info)
+        tag_info.foreach(tag_handler, None)
+
     def on_gst_buffering(self, bus, message):
+        # per GST documentation:
+        # Note that applications should keep/set the pipeline in the PAUSED state when a BUFFERING
+        # message is received with a buffer percent value < 100 and set the pipeline back to PLAYING
+        # state when a BUFFERING message with a value of 100 percent is received.
+        
+        # 100% doesn't mean the entire song is downloaded, but it does mean that it's safe to play.
+        # trying to play before 100% will cause stuttering.
         percent = message.parse_buffering()
         self.buffer_percent = percent
-        #if percent < 100:
-            #self.player.set_state(gst.STATE_PAUSED)
-        #elif self.playing:
-            #self.player.set_state(gst.STATE_PLAYING)
+        if percent < 100:
+            self.player.set_state(Gst.State.PAUSED)
+        else:
+            if self.playing:
+                self.play()
+                self.song_started = True
         self.update_song_row()
+        logging.debug("Buffering (%i%%)"%self.buffer_percent)
 
     def set_volume_cb(self, volume):
         # Convert to the cubic scale that the volume slider uses
@@ -641,7 +720,7 @@ class PithosWindow(gtk.Window):
 
     def on_gst_volume(self, player, volumespec):
         vol = self.player.get_property('volume')
-        gobject.idle_add(self.set_volume_cb, vol)
+        GLib.idle_add(self.set_volume_cb, vol)
 
     def on_gst_source(self, player, params):
         """ Setup httpsoupsrc to match Pithos proxy settings """
@@ -654,21 +733,23 @@ class PithosWindow(gtk.Window):
             soup.proxy_pw = password
 
     def song_text(self, song):
-        title = cgi.escape(song.title)
-        artist = cgi.escape(song.artist)
-        album = cgi.escape(song.album)
+        title = html.escape(song.title)
+        artist = html.escape(song.artist)
+        album = html.escape(song.album)
         msg = []
         if song is self.current_song:
-            try:
-                dur_int = self.player.query_duration(self.time_format, None)[0]
+            dur_stat, dur_int = self.player.query_duration(self.time_format)
+            pos_stat, pos_int = self.player.query_position(self.time_format)
+            if not self.song_started:
+                pos_int = 0
+            if not song.bitrate is None:
+                msg.append("%0dkbit/s" % (song.bitrate / 1000))
+            if dur_stat and pos_stat:
                 dur_str = self.format_time(dur_int)
-                pos_int = self.player.query_position(self.time_format, None)[0]
                 pos_str = self.format_time(pos_int)
                 msg.append("%s / %s" %(pos_str, dur_str))
                 if not self.playing:
                     msg.append("Paused")
-            except gst.QueryError:
-                pass
             if self.buffer_percent < 100:
                 msg.append("Buffering (%i%%)"%self.buffer_percent)
         if song.message:
@@ -676,22 +757,28 @@ class PithosWindow(gtk.Window):
         msg = " - ".join(msg)
         if not msg:
             msg = " "
-        return "<b><big>%s</big></b>\nby <b>%s</b>\n<small>from <i>%s</i></small>\n<small>%s</small>"%(title, artist, album, msg)
+
+        if song.is_ad:
+            description = "<b><big>Commercial Advertisement</big></b>\n<b>Pandora</b>"
+        else:
+            description = "<b><big>%s</big></b>\nby <b>%s</b>\n<small>from <i>%s</i></small>" % (title, artist, album)
+
+        return "%s\n<small>%s</small>" % (description, msg)
 
     def song_icon(self, song):
         if song.tired:
-            return gtk.STOCK_JUMP_TO
+            return Gtk.STOCK_JUMP_TO
         if song.rating == RATE_LOVE:
-            return gtk.STOCK_ABOUT
+            return Gtk.STOCK_ABOUT
         if song.rating == RATE_BAN:
-            return gtk.STOCK_CANCEL
+            return Gtk.STOCK_CANCEL
 
     def update_song_row(self, song = None):
         if song is None:
             song = self.current_song
         if song:
             self.songs_model[song.index][1] = self.song_text(song)
-            self.songs_model[song.index][2] = self.song_icon(song)
+            self.songs_model[song.index][2] = self.song_icon(song) or ""
         return self.playing
 
     def stations_combo_changed(self, widget):
@@ -700,11 +787,11 @@ class PithosWindow(gtk.Window):
             self.station_changed(self.stations_model[index][0])
 
     def format_time(self, time_int):
-        time_int = time_int / 1000000000
+        time_int = time_int // 1000000000
         s = time_int % 60
-        time_int /= 60
+        time_int //= 60
         m = time_int % 60
-        time_int /= 60
+        time_int //= 60
         h = time_int
 
         if h:
@@ -817,10 +904,10 @@ class PithosWindow(gtk.Window):
                 self.song_menu_ban.set_property("visible", rating != RATE_BAN);
                 self.song_menu_unban.set_property("visible", rating == RATE_BAN);
 
-                self.song_menu.popup( None, None, None, event.button, time)
+                self.song_menu.popup( None, None, None, None, event.button, time)
                 return True
 
-            if event.button == 1 and event.type == gtk.gdk._2BUTTON_PRESS:
+            if event.button == 1 and event.type == Gdk.EventType._2BUTTON_PRESS:
                 logging.info("Double clicked on song %s", self.selected_song().index)
                 if self.selected_song().index <= self.current_song_index:
                     return False
@@ -849,35 +936,44 @@ class PithosWindow(gtk.Window):
         self.player.set_property("volume", new_volume)
         self.preferences['volume'] = new_volume
 
-    def on_volume_change_event(self, volumebutton, value):
+    def set_player_volume(self, value):
+        logging.info('%.3f' % value)
         # Use a cubic scale for volume. This matches what PulseAudio uses.
         volume = math.pow(value, 3)
         self.player.set_property("volume", volume)
         self.preferences['volume'] = volume
 
+    def adjust_volume(self, amount):
+        old_volume = self.volume.get_property("value")
+        new_volume = max(0.0, min(1.0, old_volume + 0.02 * amount))
+
+        if new_volume != old_volume:
+            self.volume.set_property("value", new_volume)
+
+    def on_volume_change_event(self, volumebutton, value):
+        self.set_player_volume(value)
+
     def station_properties(self, *ignore):
         openBrowser(self.current_station.info_url)
 
-    def open_web_site(self, *ignore):
-        openBrowser("http://kevinmehall.net/p/pithos?utm_source=pithos&utm_medium=app&utm_campaign=%s"%VERSION)
-
-    def report_bug(self, *ignore):
-        openBrowser("https://bugs.launchpad.net/pithos")
-
-    def about(self, widget, data=None):
+    def show_about(self):
         """about - display the about box for pithos """
         about = AboutPithosDialog.NewAboutPithosDialog()
+        about.set_transient_for(self)
         about.set_version(VERSION)
         response = about.run()
         about.destroy()
 
-    def show_preferences(self, widget=None, data=None, is_startup=False):
+    def show_preferences(self, is_startup=False):
         """preferences - display the preferences window for pithos """
+        if is_startup:
+            self.prefs_dlg.set_type_hint(Gdk.WindowTypeHint.NORMAL)
+
         old_prefs = dict(self.preferences)
         response = self.prefs_dlg.run()
         self.prefs_dlg.hide()
 
-        if response == gtk.RESPONSE_OK:
+        if response == Gtk.ResponseType.OK:
             self.preferences = self.prefs_dlg.get_preferences()
             if not is_startup:
                 if (   self.preferences['proxy'] != old_prefs['proxy']
@@ -889,13 +985,16 @@ class PithosWindow(gtk.Window):
                     or self.preferences['password'] != old_prefs['password']
                     or self.preferences['pandora_one'] != old_prefs['pandora_one']):
                         self.pandora_connect()
+            else:
+                self.prefs_dlg.set_type_hint(Gdk.WindowTypeHint.DIALOG)
             load_plugins(self)
 
-    def stations_dialog(self, *ignore):
+    def show_stations(self):
         if self.stations_dlg:
             self.stations_dlg.present()
         else:
             self.stations_dlg = StationsDialog.NewStationsDialog(self)
+            self.stations_dlg.set_transient_for(self)
             self.stations_dlg.show_all()
 
     def refresh_stations(self, *ignore):
@@ -906,7 +1005,7 @@ class PithosWindow(gtk.Window):
         self.present()
 
     def on_kb_playpause(self, widget=None, data=None):
-        if not isinstance(widget.get_focus(), gtk.Button) and data.keyval == 32:
+        if not isinstance(widget.get_focus(), Gtk.Button) and data.keyval == 32:
             self.playpause()
             return True
 
@@ -919,9 +1018,9 @@ class PithosWindow(gtk.Window):
         self.stop()
         self.preferences['last_station_id'] = self.current_station_id
         self.prefs_dlg.save()
-        gtk.main_quit()
+        self.quit()
 
-def NewPithosWindow(options):
+def NewPithosWindow(app, options):
     """NewPithosWindow - returns a fully instantiated
     PithosWindow object. Use this function rather than
     creating a PithosWindow directly.
@@ -932,37 +1031,101 @@ def NewPithosWindow(options):
     if not os.path.exists(ui_filename):
         ui_filename = None
 
-    builder = gtk.Builder()
+    builder = Gtk.Builder()
     builder.add_from_file(ui_filename)
     window = builder.get_object("pithos_window")
+    window.set_application(app)
     window.finish_initializing(builder, options)
     return window
 
+class PithosApplication(Gtk.Application):
+    def __init__(self):
+        # Use org.gnome to avoid conflict with existing dbus interface net.kevinmehall
+        Gtk.Application.__init__(self, application_id='org.gnome.pithos',
+                                flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE)
+        self.window = None
+        self.options = None
 
-def main():
-    import logging, optparse
-    parser = optparse.OptionParser(version="Pithos %s"%(VERSION))
-    parser.add_option("-v", "--verbose", action="store_true", dest="verbose", help="Show debug messages")
-    parser.add_option("-t", "--test", action="store_true", dest="test", help="Use a mock web interface instead of connecting to the real Pandora server")
-    (options, args) = parser.parse_args()
+    def do_startup(self):
+        Gtk.Application.do_startup(self)
 
-    if not options.test and try_to_raise():
-        print "Raised existing Pithos instance"
-    else:
+        # Setup appmenu
+        ui_filename = os.path.join(getdatapath(), 'ui', 'app_menu.ui')
+        builder = Gtk.Builder()
+        builder.add_from_file(ui_filename)
+        menu = builder.get_object("app-menu")
+        self.set_app_menu(menu)
+
+        action = Gio.SimpleAction.new("stations", None)
+        action.connect("activate", self.stations_cb)
+        self.add_action(action)
+
+        action = Gio.SimpleAction.new("preferences", None)
+        action.connect("activate", self.prefs_cb)
+        self.add_action(action)
+
+        action = Gio.SimpleAction.new("about", None)
+        action.connect("activate", self.about_cb)
+        self.add_action(action)
+
+        action = Gio.SimpleAction.new("quit", None)
+        action.connect("activate", self.quit_cb)
+        self.add_action(action)
+
+    # FIXME: do_local_command_line() segfaults?
+    def do_command_line(self, args):
+        Gtk.Application.do_command_line(self, args)
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument("-v", "--verbose", action="count", default=0, dest="verbose", help="Show debug messages")
+        parser.add_argument("-t", "--test", action="store_true", dest="test", help="Use a mock web interface instead of connecting to the real Pandora server")
+        self.options = parser.parse_args(args.get_arguments()[1:])
+
+        # First, get rid of existing logging handlers due to call in header as per
+        # http://stackoverflow.com/questions/1943747/python-logging-before-you-run-logging-basicconfig
+        logging.root.handlers = []
 
         #set the logging level to show debug messages
-        if options.verbose:
-            logging.basicConfig(level=logging.INFO, format='%(levelname)s - %(module)s:%(funcName)s:%(lineno)d - %(message)s')
+        if self.options.verbose > 1:
+            log_level = logging.DEBUG
+        elif self.options.verbose == 1:
+            log_level = logging.INFO
         else:
-            logging.basicConfig(level=logging.WARNING)
+            log_level = logging.WARN
 
-        logging.info("Pithos %s"%VERSION)
+        logging.basicConfig(level=log_level, format='%(levelname)s - %(module)s:%(funcName)s:%(lineno)d - %(message)s')
 
-        window = NewPithosWindow(options)
-        window.show()
-        gtk.main()
+        self.do_activate()
 
+        return 0
+
+    def do_activate(self):
+        if not self.window:
+            logging.info("Pithos %s" %VERSION)
+            self.window = NewPithosWindow(self, self.options)
+
+        self.window.present()
+
+    def do_shutdown(self):
+        Gtk.Application.do_shutdown(self)
+        self.quit()
+
+    def stations_cb(self, action, param):
+        self.window.show_stations()
+
+    def prefs_cb(self, action, param):
+        self.window.show_preferences()
+
+    def about_cb(self, action, param):
+        self.window.show_about()
+
+    def quit_cb(self, action, param):
+        self.quit()
+
+def main():
+    app = PithosApplication()
+    exit_status = app.run(sys.argv)
+    sys.exit(exit_status)
 
 if __name__ == '__main__':
     main()
-

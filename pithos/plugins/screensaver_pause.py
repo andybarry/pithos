@@ -15,14 +15,20 @@
 ### END LICENSE
 
 from pithos.plugin import PithosPlugin
-import dbus
 import logging
 
 
 class ScreenSaverPausePlugin(PithosPlugin):
     preference = 'enable_screensaverpause'
+
+    session_bus = None
     
     def bind_session_bus(self):
+        try:
+            import dbus
+        except ImportError:
+            return False
+
         try:
             self.session_bus = dbus.SessionBus()
             return True
@@ -30,16 +36,22 @@ class ScreenSaverPausePlugin(PithosPlugin):
             return False
         
     def on_enable(self):
-        self.bind_session_bus() or logging.error("Could not bind session bus")
+        if not self.bind_session_bus():
+            logging.error("Could not bind session bus")
+            return
         self.connect_events() or logging.error("Could not connect events")
 
     def on_disable(self):
-        self.disconnect_events()
+        if self.session_bus:
+            self.disconnect_events()
+
         self.session_bus = None
 
     def connect_events(self):
         try:
             self.session_bus.add_signal_receiver(self.playPause, 'ActiveChanged', 'org.gnome.ScreenSaver')
+            self.session_bus.add_signal_receiver(self.playPause, 'ActiveChanged', 'org.cinnamon.ScreenSaver')
+            self.session_bus.add_signal_receiver(self.playPause, 'ActiveChanged', 'org.freedesktop.ScreenSaver')
             return True
         except dbus.DBusException:
             logging.info("Enable failed")
@@ -48,6 +60,8 @@ class ScreenSaverPausePlugin(PithosPlugin):
     def disconnect_events(self):
         try:
             self.session_bus.remove_signal_receiver(self.playPause, 'ActiveChanged', 'org.gnome.ScreenSaver')
+            self.session_bus.remove_signal_receiver(self.playPause, 'ActiveChanged', 'org.cinnamon.ScreenSaver')
+            self.session_bus.remove_signal_receiver(self.playPause, 'ActiveChanged', 'org.freedesktop.ScreenSaver')
             return True
         except dbus.DBusException:
             return False

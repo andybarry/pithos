@@ -14,17 +14,18 @@
 #with this program.  If not, see <http://www.gnu.org/licenses/>.
 ### END LICENSE
 
+import logging
 import threading
-import Queue
-import gobject
+import queue
+from gi.repository import GObject, GLib
 import traceback
-gobject.threads_init()
+GObject.threads_init()
 
 class GObjectWorker():
     def __init__(self):
         self.thread = threading.Thread(target=self._run)
         self.thread.daemon = True
-        self.queue = Queue.Queue()
+        self.queue = queue.Queue()
         self.thread.start()
         
     def _run(self):
@@ -33,36 +34,37 @@ class GObjectWorker():
             try:
                 result = command(*args)
                 if callback:
-                    gobject.idle_add(callback, result)
-            except Exception, e:
+                    GLib.idle_add(callback, result)
+            except Exception as e:
                 e.traceback = traceback.format_exc()
                 if errorback:
-                    gobject.idle_add(errorback, e)
+                    GLib.idle_add(errorback, e)
                 
     def send(self, command, args=(), callback=None, errorback=None):
         if errorback is None: errorback = self._default_errorback
         self.queue.put((command, args, callback, errorback))
         
     def _default_errorback(self, error):
-        print "Unhandled exception in worker thread:\n", error.traceback
+        logging.error("Unhandled exception in worker thread:\n{}".format(error.traceback))
         
 if __name__ == '__main__':
     worker = GObjectWorker()
-    import time, gtk
+    import time
+    from gi.repository import Gtk
     
     def test_cmd(a, b):
-        print "running..."
+        logging.info("running...")
         time.sleep(5)
-        print "done"
+        logging.info("done")
         return a*b
         
     def test_cb(result):
-        print "got result", result
+        logging.info("got result {}".format(result))
         
-    print "sending"
+    logging.info("sending")
     worker.send(test_cmd, (3,4), test_cb)
     worker.send(test_cmd, ((), ()), test_cb) #trigger exception in worker to test error handling
     
-    gtk.main()
+    Gtk.main()
         
                 

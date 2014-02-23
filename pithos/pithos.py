@@ -604,24 +604,24 @@ class PithosWindow(Gtk.ApplicationWindow):
         return [i[0] for i in self.stations_model].index(station)
 
     def station_changed(self, station, reconnecting=False):
-        print "in station_changed"
+        #print "in station_changed"
         if station is self.current_station: return
-        print "in station_changed2"
+        #print "in station_changed2"
         self.waiting_for_playlist = False
         if not reconnecting:
             self.stop()
             self.current_song_index = None
             self.songs_model.clear()
         logging.info("Selecting station %s; total = %i" % (station.id, len(self.stations_model)))
-        print "in station_changed after logging"
+        #print "in station_changed after logging"
         self.current_station_id = station.id
         self.current_station = station
-        print "in station_changed, set station"
+        #print "in station_changed, set station"
         if not reconnecting:
-            print "in station_changed, getting playlist..."
+            #print "in station_changed, getting playlist..."
             self.get_playlist(start = True)
-            print "in station_changed, got playlist"
-        print "in station_changed, setting combo"
+            #print "in station_changed, got playlist"
+        #print "in station_changed, setting combo"
         self.stations_combo.set_active(self.station_index(station))
 
     def on_gst_eos(self, bus, message):
@@ -848,19 +848,19 @@ class PithosWindow(Gtk.ApplicationWindow):
         # get the current station index
         num = 0
         for i in self.pandora.stations:
-            print "num = " + str(num)
+            print("num = " + str(num))
             if i.id == self.current_station_id:
                 break
             num = num + 1
-        print "final num = " + str(num)
-        print "len = " + str(len(self.pandora.stations))
+        print("final num = " + str(num))
+        print("len = " + str(len(self.pandora.stations)))
         if (len(self.pandora.stations) == num + 1):
             index = 1 # this would be 0, but we do not want to include quickmix
         else:
             index = num + 1
-        print "index = " + str(index)
+        print("index = " + str(index))
         #self.stations_combo.set_active(self.station_index(self.pandora.stations[num]))
-        print self.pandora.stations[index].id
+        print(self.pandora.stations[index].id)
         self.station_changed(self.pandora.stations[index])
         #print self.stations_model
         #self.station_changed(self.stations_model[1][0])
